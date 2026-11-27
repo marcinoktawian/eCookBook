@@ -22,8 +22,8 @@ Seeed reTerminal E1001:
 | Przycisk | Krótko | Długo |
 |---|---|---|
 | Lewo | poprzednia pozycja lub strona | cofnij |
-| Prawo | następna pozycja lub strona | menu (synchronizacja, informacje) |
-| Wybierz (zielony) | otwórz; w przepisie: przeskok składniki ⇄ przygotowanie | uśpienie |
+| Prawo | następna pozycja lub strona | synchronizacja z serwerem |
+| Wybierz (zielony) | otwórz; w przepisie: przeskok składniki ⇄ przygotowanie | uśpienie; ponad 3 s: tapeta i uśpienie |
 
 - **Tagi:** lista tagów, np. `mięso`, `wegetariańskie`, `włoskie`, `azjatyckie`, z liczbą
   przepisów przy każdym. Jest też pozycja „Wszystkie”.
@@ -33,9 +33,14 @@ Seeed reTerminal E1001:
   składników, a drugie naciśnięcie wraca dokładnie na tę stronę, z której przyszedłeś.
   Ze składników, gdy nic nie jest zapamiętane, przeskakuje na początek przygotowania.
   W nagłówku jest tytuł, nazwa sekcji i numer strony.
-- **Usypianie:** gdy żaden przycisk nie jest używany przez kilka minut, urządzenie przechodzi
-  w głęboki sen. Ekran e-ink dalej pokazuje ostatnią stronę, więc przepis widać podczas
-  gotowania. Budzi je dowolny przycisk.
+- **Usypianie:** po 3 minutach bez naciśnięcia albo po przytrzymaniu zielonego urządzenie
+  przechodzi w głęboki sen. Ekran odświeża się z księżycem w prawym dolnym rogu i dalej
+  pokazuje ostatnią stronę, więc przepis widać podczas gotowania. Dowolny przycisk budzi
+  urządzenie na tej samej stronie.
+- **Tapeta:** zielony przytrzymany ponad 3 sekundy pokazuje losowe zdjęcie JPG z folderu
+  `/wallpaper` na karcie (przycięte do ekranu, czarno-białe z rozpraszaniem) i usypia
+  urządzenie. Po obudzeniu zaczyna się od listy tagów.
+- **Bateria:** procent naładowania w nagłówku listy tagów.
 
 ## Przepisy
 

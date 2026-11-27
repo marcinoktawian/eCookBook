@@ -23,9 +23,11 @@ pio device monitor
 
 Testy logiki uruchamiane na komputerze: `pio test -e native`.
 
-Obecny stan: etap 4. Urządzenie czyta przepisy z folderu `/recipes` na karcie microSD
-(FAT32), a przeglądasz je ścieżką tagi → lista przepisów → przepis (skrót obsługi w
-[docs/vision.md](docs/vision.md)).
+Obecny stan: etap 5. Urządzenie czyta przepisy z folderu `/recipes` na karcie microSD
+(FAT32), a przeglądasz je ścieżką tagi → lista przepisów → przepis. Po 3 minutach
+bezczynności albo po przytrzymaniu zielonego zasypia i budzi się na tej samej stronie.
+Przytrzymanie zielonego ponad 3 sekundy pokazuje losowe zdjęcie z `/wallpaper`. Skrót
+obsługi jest w [docs/vision.md](docs/vision.md).
 
 ### Synchronizacja z serwerem
 

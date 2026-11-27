@@ -1,16 +1,20 @@
 #include <Arduino.h>
 #include <GxEPD2_BW.h>
 #include <HTTPClient.h>
+#include <JPEGDEC.h>
 #include <SD.h>
 #include <SPI.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <WiFi.h>
+#include <driver/rtc_io.h>
 #include <mbedtls/sha256.h>
 
+#include "battery.h"
 #include "button.h"
 #include "catalog.h"
 #include "recipe.h"
 #include "sync.h"
+#include "wallpaper.h"
 
 // reTerminal E1001 wiring. The panel and the microSD card share SCK/MOSI on one SPI bus.
 constexpr int SPI_SCK = 7;
@@ -22,6 +26,13 @@ constexpr int EPD_RST = 12;
 constexpr int EPD_BUSY = 13;
 constexpr int SD_CS = 14;
 constexpr int SD_POWER = 16;  // HIGH powers the card
+constexpr int BATTERY_ADC = 1;      // battery through a 10k/10k divider
+constexpr int BATTERY_ENABLE = 21;  // HIGH connects the divider
+constexpr float BATTERY_DIVIDER = 2.0f;
+
+constexpr uint32_t SLEEP_AFTER_MS = 3 * 60 * 1000;  // e-ink keeps the page while asleep
+constexpr uint32_t WALLPAPER_HOLD_MS = 3000;        // green held this long: wallpaper, then sleep
+constexpr const char *WALLPAPER_DIR = "/wallpaper";
 
 // Keys are active-low. Confirmed on hardware, viewed from the front.
 constexpr int KEY_GREEN = 3;
@@ -126,7 +137,20 @@ void drawHeader(const std::string &title, const std::string &label) {
   display.fillRect(MARGIN, RULE_Y, display.width() - 2 * MARGIN, 2, GxEPD_BLACK);
 }
 
+bool asleep = false;     // draws the moon: set only for the last refresh before deep sleep
+std::string lastMessage;  // redrawn with the moon when sleeping on a message screen
+
+// Crescent moon in the bottom-right corner, on a white disc so it stays clear of any text.
+void drawSleepBadge() {
+  if (!asleep) return;
+  const int x = display.width() - 34, y = display.height() - 30;
+  display.fillCircle(x, y, 18, GxEPD_WHITE);
+  display.fillCircle(x, y, 13, GxEPD_BLACK);
+  display.fillCircle(x + 7, y - 5, 12, GxEPD_WHITE);
+}
+
 void showMessage(const char *text) {
+  lastMessage = text;
   beginDraw(true);
   do {
     display.fillScreen(GxEPD_WHITE);
@@ -134,14 +158,17 @@ void showMessage(const char *text) {
     u8g2.setFont(FONT_TITLE);
     const int x = (display.width() - u8g2.getUTF8Width(text)) / 2;
     u8g2.drawUTF8(x, display.height() / 2, text);
+    drawSleepBadge();
   } while (display.nextPage());
 }
 
 // A scrolling list: shows the page of rows that holds `selected`, with that row inverted.
 void drawList(const std::string &title, size_t count, size_t selected,
-              const std::function<void(size_t, std::string &, std::string &)> &row, bool full) {
+              const std::function<void(size_t, std::string &, std::string &)> &row, bool full,
+              const std::string &note = "") {
   const size_t first = selected / ROWS_PER_PAGE * ROWS_PER_PAGE;
-  const std::string label = std::to_string(selected + 1) + "/" + std::to_string(count);
+  std::string label = std::to_string(selected + 1) + "/" + std::to_string(count);
+  if (!note.empty()) label = note + " · " + label;
   const int rowWidth = display.width() - 2 * MARGIN;
 
   beginDraw(full);
@@ -164,6 +191,7 @@ void drawList(const std::string &title, size_t count, size_t selected,
     }
     u8g2.setForegroundColor(GxEPD_BLACK);
     u8g2.setBackgroundColor(GxEPD_WHITE);
+    drawSleepBadge();
   } while (display.nextPage());
 }
 
@@ -187,7 +215,16 @@ void drawRecipe(bool full) {
       u8g2.drawUTF8(x, baseline, line.text.c_str());
       baseline += LINE_HEIGHT;
     }
+    drawSleepBadge();
   } while (display.nextPage());
+}
+
+int readBatteryMillivolts() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; ++i) sum += analogReadMilliVolts(BATTERY_ADC);
+  const int mv = int(sum / 16 * BATTERY_DIVIDER);
+  Serial.printf("Battery: %d mV (%d%%)\n", mv, batteryPercent(mv));
+  return mv;
 }
 
 void draw(bool full) {
@@ -198,7 +235,7 @@ void draw(bool full) {
                  left = tags[i].name;
                  right = std::to_string(tags[i].count);
                },
-               full);
+               full, "bateria " + std::to_string(batteryPercent(readBatteryMillivolts())) + "%");
       break;
     case Screen::Recipes:
       drawList(tags[tagSel].name, listed.size(), recipeSel,
@@ -434,7 +471,7 @@ std::string syncRecipes() {
   const Config config = parseConfig(text);
   if (config.ssid.empty() || config.server.empty()) return "Uzupełnij wifi_ssid i server w /config.txt";
 
-  showMessage("Synchronizacja…");
+  showMessage("Synchronizacja...");
   SD.mkdir(RECIPES_DIR);
   std::string result = connectWifi(config);
   if (result.empty()) result = syncOverWifi(config.server);
@@ -500,24 +537,209 @@ bool handle(const KeyEvent &e) {
   return false;
 }
 
+// --- Sleep -----------------------------------------------------------------------------
+
+// Where the reader was when it went to sleep. RTC memory survives deep sleep (not power-off),
+// so waking up brings back the same screen and page. Names, not indexes, so a changed card
+// cannot point the restore at the wrong recipe.
+struct SavedState {
+  uint32_t magic;
+  Screen screen;
+  char tag[64];
+  char recipePath[96];
+  uint16_t page;
+  int16_t returnPage;
+};
+constexpr uint32_t STATE_MAGIC = 0xEC0B0001;
+RTC_DATA_ATTR SavedState saved;
+
+void saveState() {
+  saved = {};
+  saved.magic = STATE_MAGIC;
+  saved.screen = screen;
+  if (!tags.empty()) strlcpy(saved.tag, tags[tagSel].name.c_str(), sizeof(saved.tag));
+  if (screen != Screen::Tags && !listed.empty()) {
+    strlcpy(saved.recipePath, catalog[listed[recipeSel]].path.c_str(), sizeof(saved.recipePath));
+  }
+  saved.page = uint16_t(currentPage);
+  saved.returnPage = int16_t(returnPage);
+}
+
+// Re-applies a saved state on top of a freshly loaded catalog. Anything that no longer
+// matches (tag or recipe gone) falls back to the nearest screen that still makes sense.
+void restoreState() {
+  if (saved.magic != STATE_MAGIC) return;
+  saved.magic = 0;  // use once
+
+  for (size_t i = 0; i < tags.size(); ++i) {
+    if (tags[i].name == saved.tag) tagSel = i;
+  }
+  if (saved.screen == Screen::Tags) return;
+
+  listed = recipesWithTag(catalog, tagSel == 0 ? "" : tags[tagSel].name);
+  for (size_t i = 0; i < listed.size(); ++i) {
+    if (catalog[listed[i]].path == saved.recipePath) {
+      recipeSel = i;
+      screen = Screen::Recipes;
+    }
+  }
+  if (screen != Screen::Recipes || saved.screen != Screen::Recipe) return;
+  if (!openRecipe(catalog[listed[recipeSel]])) return;
+  screen = Screen::Recipe;
+  currentPage = std::min<size_t>(saved.page, pages.size() - 1);
+  returnPage = saved.returnPage < int(pages.size()) ? saved.returnPage : -1;
+}
+
+// --- Wallpaper -------------------------------------------------------------------------
+
+JPEGDEC jpeg;
+File jpegFile;
+Fit jpegFit;
+
+void *jpegOpen(const char *path, int32_t *size) {
+  jpegFile = SD.open(path);
+  if (!jpegFile) return nullptr;
+  *size = jpegFile.size();
+  return &jpegFile;
+}
+void jpegClose(void *handle) { static_cast<File *>(handle)->close(); }
+int32_t jpegRead(JPEGFILE *f, uint8_t *buf, int32_t len) { return static_cast<File *>(f->fHandle)->read(buf, len); }
+int32_t jpegSeek(JPEGFILE *f, int32_t pos) { return static_cast<File *>(f->fHandle)->seek(pos); }
+
+// The decoder hands over one block of 8-bit gray pixels at a time; dither each straight
+// onto the screen buffer. Pixels outside the screen (the cropped edges) are clipped.
+int jpegDraw(JPEGDRAW *block) {
+  const uint8_t *gray = reinterpret_cast<const uint8_t *>(block->pPixels);
+  for (int y = 0; y < block->iHeight; ++y) {
+    const int sy = block->y + y + jpegFit.offsetY;
+    if (sy < 0 || sy >= display.height()) continue;
+    for (int x = 0; x < block->iWidthUsed; ++x) {  // iWidth is the row pitch, past the image edge
+      const int sx = block->x + x + jpegFit.offsetX;
+      if (sx < 0 || sx >= display.width()) continue;
+      display.drawPixel(sx, sy, ditherBlack(sx, sy, gray[y * block->iWidth + x]) ? GxEPD_BLACK : GxEPD_WHITE);
+    }
+  }
+  return 1;
+}
+
+// A random .jpg/.jpeg from WALLPAPER_DIR, or "" when there is none.
+std::string pickWallpaper() {
+  std::vector<std::string> files;
+  if (!SD.exists(WALLPAPER_DIR)) return "";
+  File dir = SD.open(WALLPAPER_DIR);
+  if (!dir || !dir.isDirectory()) return "";
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    String name = f.name();
+    const String path = f.path();
+    name.toLowerCase();
+    if (!f.isDirectory() && !name.startsWith(".") && (name.endsWith(".jpg") || name.endsWith(".jpeg"))) {
+      files.push_back(path.c_str());
+    }
+  }
+  return files.empty() ? "" : files[esp_random() % files.size()];
+}
+
+// Draws a wallpaper with a full refresh. Returns an error for the screen, or nullptr.
+const char *showWallpaper() {
+  if (!sdReady) return "Brak karty SD";
+  const std::string path = pickWallpaper();
+  if (path.empty()) return "Brak obrazków JPG w /wallpaper";
+
+  if (!jpeg.open(path.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDraw)) {
+    Serial.printf("Wallpaper %s: cannot open (error %d)\n", path.c_str(), jpeg.getLastError());
+    return "Nie mogę otworzyć obrazka";
+  }
+  jpegFit = fitImage(jpeg.getWidth(), jpeg.getHeight(), display.width(), display.height());
+  Serial.printf("Wallpaper %s: %dx%d, 1/%d\n", path.c_str(), jpeg.getWidth(), jpeg.getHeight(), jpegFit.scale);
+  jpeg.setPixelType(EIGHT_BIT_GRAYSCALE);
+  const int scaleOption = jpegFit.scale == 8 ? JPEG_SCALE_EIGHTH
+                          : jpegFit.scale == 4 ? JPEG_SCALE_QUARTER
+                          : jpegFit.scale == 2 ? JPEG_SCALE_HALF
+                                               : 0;
+  bool ok = true;
+  beginDraw(true);
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    ok = jpeg.decode(0, 0, scaleOption) == 1;
+  } while (display.nextPage());
+  jpeg.close();
+  if (!ok) {
+    // Progressive JPEGs are not supported by the decoder; say so instead of a blank page.
+    Serial.printf("Wallpaper %s: decode failed (error %d)\n", path.c_str(), jpeg.getLastError());
+    return "Obrazek w nieobsługiwanym formacie";
+  }
+  return nullptr;
+}
+
+bool anyKeyDown() {
+  for (int pin : KEY_PINS) {
+    if (digitalRead(pin) == LOW) return true;
+  }
+  return false;
+}
+
+// Deep sleep until any key is pressed. With `keepPage` the panel keeps the current page, now
+// with the moon (a full refresh that also clears ghosting), and waking returns to it; without,
+// whatever is on screen (the wallpaper) stays and waking starts at the tag list.
+void goToSleep(bool keepPage = true) {
+  Serial.println("Going to sleep");
+  if (keepPage) {
+    saveState();
+    asleep = true;
+    if (catalog.empty()) {
+      showMessage(lastMessage.c_str());
+    } else {
+      draw(true);
+    }
+  } else {
+    saved.magic = 0;
+  }
+  display.hibernate();
+  digitalWrite(SD_POWER, LOW);
+  digitalWrite(BATTERY_ENABLE, LOW);
+
+  while (anyKeyDown()) delay(10);  // a key still held (the long green press) would wake us at once
+  delay(50);
+
+  uint64_t mask = 0;
+  for (int pin : KEY_PINS) {
+    mask |= 1ULL << pin;
+    rtc_gpio_pullup_en(gpio_num_t(pin));
+    rtc_gpio_pulldown_dis(gpio_num_t(pin));
+  }
+  esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
 // --- Main ------------------------------------------------------------------------------
 
-// (Re)reads the card and shows the tag list, or the reason there is nothing to show.
-void showCatalog() {
+// (Re)reads the card and shows the tag list (or, after waking, the saved screen), or the
+// reason there is nothing to show.
+void showCatalog(bool restore = false) {
   screen = Screen::Tags;
   if (const char *error = loadCatalog()) {
     Serial.println(error);
     showMessage(error);
-  } else {
-    draw(true);
+    return;
   }
+  if (restore) restoreState();
+  draw(true);
 }
+
+uint32_t lastActivityMs = 0;
 
 void setup() {
   Serial.begin(115200);
-  for (int pin : KEY_PINS) pinMode(pin, INPUT_PULLUP);
+  const bool wokeByKey = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1;
+  for (int pin : KEY_PINS) {
+    if (wokeByKey) rtc_gpio_deinit(gpio_num_t(pin));  // hand the pins back from the sleep config
+    pinMode(pin, INPUT_PULLUP);
+  }
   pinMode(SD_POWER, OUTPUT);
   digitalWrite(SD_POWER, HIGH);
+  pinMode(BATTERY_ENABLE, OUTPUT);
+  digitalWrite(BATTERY_ENABLE, HIGH);
 
   spiBus.begin(SPI_SCK, SPI_MISO, SPI_MOSI, -1);
   display.epd2.selectSPI(spiBus, SPISettings(4000000, MSBFIRST, SPI_MODE0));
@@ -529,15 +751,23 @@ void setup() {
   u8g2.setBackgroundColor(GxEPD_WHITE);
 
   sdReady = SD.begin(SD_CS, spiBus, 10000000);
-  showCatalog();
+  showCatalog(wokeByKey);
 
+  // The key that woke us only wakes; don't let it also count as a press.
+  while (anyKeyDown()) delay(10);
   keyEvents = xQueueCreate(16, sizeof(KeyEvent));
   xTaskCreate(keyTask, "keys", 2048, nullptr, 2, nullptr);
+  lastActivityMs = millis();
 }
 
 void loop() {
   KeyEvent e;
-  xQueueReceive(keyEvents, &e, portMAX_DELAY);
+  const uint32_t idle = millis() - lastActivityMs;
+  if (idle >= SLEEP_AFTER_MS ||
+      xQueueReceive(keyEvents, &e, pdMS_TO_TICKS(SLEEP_AFTER_MS - idle)) != pdTRUE) {
+    goToSleep();
+  }
+  lastActivityMs = millis();
 
   // Apply every queued press, then draw once: fast presses skip intermediate refreshes.
   // Changing screens uses a full refresh to clear e-ink ghosting; moving within one is partial.
@@ -546,19 +776,40 @@ void loop() {
   const size_t before[] = {tagSel, recipeSel, currentPage};
   bool screenChanged = false;
   bool sync = false;
+  bool sleep = false;
   do {
     if (e.press == Press::Long && e.pin == KEY_RIGHT) {
       sync = true;
+    } else if (e.press == Press::Long && e.pin == KEY_GREEN) {
+      sleep = true;
     } else if (!catalog.empty()) {
       screenChanged |= handle(e);
     }
   } while (xQueueReceive(keyEvents, &e, 0) == pdTRUE);
 
+  if (sleep) {
+    // The long press fired at Button::kLongMs; keep watching the green key to tell a plain
+    // sleep (released early) from the wallpaper (still held at WALLPAPER_HOLD_MS).
+    const uint32_t pressedAt = millis() - Button::kLongMs;
+    while (digitalRead(KEY_GREEN) == LOW && millis() - pressedAt < WALLPAPER_HOLD_MS) delay(10);
+    if (digitalRead(KEY_GREEN) == LOW) {
+      // A 12 MP phone photo takes ~5 s to read and decode; answer the long press right away.
+      showMessage("Przechodzę w stan uśpienia...");
+      if (const char *error = showWallpaper()) {
+        showMessage(error);
+        delay(2000);
+        goToSleep();
+      }
+      goToSleep(false);
+    }
+    goToSleep();
+  }
   if (sync) {
     showMessage(syncRecipes().c_str());
     delay(2000);  // leave the result readable before the tag list replaces it
     showCatalog();
     xQueueReset(keyEvents);  // presses made during the sync were aimed at nothing
+    lastActivityMs = millis();
     return;
   }
   if (catalog.empty()) return;
