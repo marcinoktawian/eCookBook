@@ -18,4 +18,6 @@ pio device monitor
 
 Testy logiki uruchamiane na komputerze: `pio test -e native`.
 
-Obecny stan: etap 1. Ekran testowy przycisków pokazuje każde krótkie i długie naciśnięcie.
+Obecny stan: etap 2. Urządzenie wyświetla pierwszy przepis z folderu `/recipes` na karcie
+microSD (FAT32) i dzieli go na strony. Lewy i prawy przycisk przewracają strony.
+Przykładowy przepis jest w [recipes/zurek.md](recipes/zurek.md).
