@@ -16,4 +16,6 @@ pio run -t upload
 pio device monitor
 ```
 
-Obecny stan: hello world (etap 0).
+Testy logiki uruchamiane na komputerze: `pio test -e native`.
+
+Obecny stan: etap 1. Ekran testowy przycisków pokazuje każde krótkie i długie naciśnięcie.
