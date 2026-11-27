@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eCookBook</title>
+<style>
+  :root {
+    --bg: #faf8f4; --surface: #ffffff; --text: #1d1b18; --muted: #6b665e; --line: #e4dfd6;
+    --accent: #2f6b4f; --accent-text: #ffffff; --danger: #a33a2c; --chip: #efeae1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161514; --surface: #201f1d; --text: #ece8e1; --muted: #a39d93; --line: #34312d;
+      --accent: #6fbf95; --accent-text: #10201a; --danger: #e07a6b; --chip: #2b2926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px 16px 96px; }
+  header { display: flex; align-items: center; gap: 12px; margin: 4px 0 16px; }
+  header h1 { font-size: 24px; margin: 0; flex: 1; }
+  a { color: var(--accent); }
+  h2 { font-size: 19px; margin: 24px 0 8px; }
+  button, .button { font: inherit; border: 1px solid var(--line); background: var(--surface); color: var(--text);
+    padding: 8px 14px; border-radius: 10px; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.primary, .button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  input, textarea { font: inherit; width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--surface); color: var(--text); }
+  textarea { min-height: 9em; resize: vertical; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  .hint { color: var(--muted); font-size: 14px; font-weight: 400; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .chip { border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 999px;
+    padding: 4px 12px; font-size: 15px; cursor: pointer; }
+  .chip.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .list { list-style: none; padding: 0; margin: 0; }
+  .list li a { display: block; padding: 12px 14px; margin-bottom: 8px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 12px; color: var(--text); text-decoration: none; }
+  .list .tags { color: var(--muted); font-size: 14px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
+  .fab { position: fixed; right: 20px; bottom: 20px; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+  .empty, .error { color: var(--muted); padding: 24px 0; }
+  .error { color: var(--danger); }
+  ol li, ul li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<main id="app"><p class="empty">Wczytywanie…</p></main>
+<script>
+"use strict";
+
+const app = document.getElementById("app");
+let recipes = [];
+let activeTag = "";
+let query = "";
+
+// Tiny DOM helper: text always goes in as text nodes, never as HTML.
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) if (c != null) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+
+function show(...nodes) { app.replaceChildren(...nodes); window.scrollTo(0, 0); }
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Błąd serwera (${res.status})`);
+  return data;
+}
+
+const collator = new Intl.Collator("pl", { sensitivity: "base" });
+const byTitle = (a, b) => collator.compare(a.title, b.title);
+const allTags = () => [...new Set(recipes.flatMap(r => r.tags))].sort(collator.compare);
+const norm = s => s.toLocaleLowerCase("pl").normalize("NFD").replace(/\p{M}/gu, "").replace(/ł/g, "l");
+
+function header(title, back) {
+  return h("header", {},
+    back ? h("a", { href: back, class: "button", "aria-label": "Wstecz" }, "←") : null,
+    h("h1", {}, title));
+}
+
+// --- Views ---------------------------------------------------------------------------
+
+function listView() {
+  const results = h("ul", { class: "list" });
+  const render = () => {
+    const q = norm(query.trim());
+    const shown = recipes
+      .filter(r => !activeTag || r.tags.includes(activeTag))
+      .filter(r => !q || norm([r.title, ...r.tags, ...r.ingredients].join(" ")).includes(q))
+      .sort(byTitle);
+    results.replaceChildren(...(shown.length ? shown.map(r =>
+      h("li", {}, h("a", { href: `#/r/${r.name}` }, r.title,
+        r.tags.length ? h("div", { class: "tags" }, r.tags.join(" · ")) : null)))
+      : [h("li", { class: "empty" }, recipes.length ? "Nic nie pasuje do wyszukiwania." : "Nie ma jeszcze przepisów. Dodaj pierwszy.")]));
+  };
+  const chip = (tag, label) => h("button", {
+    class: "chip" + (activeTag === tag ? " on" : ""),
+    onclick: e => { activeTag = tag; e.target.parentNode.querySelectorAll(".chip").forEach(c => c.classList.remove("on")); e.target.classList.add("on"); render(); },
+  }, label);
+
+  render();
+  show(
+    header("Przepisy"),
+    h("input", { type: "search", placeholder: "Szukaj w tytułach, tagach i składnikach", value: query,
+      oninput: e => { query = e.target.value; render(); } }),
+    h("div", { class: "chips" }, chip("", "Wszystkie"), allTags().map(t => chip(t, t))),
+    results,
+    h("a", { href: "#/new", class: "button primary fab" }, "+ Dodaj przepis"));
+}
+
+function recipeView(r) {
+  show(
+    header(r.title, "#/"),
+    r.tags.length ? h("div", { class: "chips" }, r.tags.map(t => h("span", { class: "chip" }, t))) : null,
+    h("h2", {}, "Składniki"),
+    r.ingredients.length ? h("ul", {}, r.ingredients.map(i => h("li", {}, i))) : h("p", { class: "empty" }, "Brak."),
+    h("h2", {}, "Przygotowanie"),
+    r.steps.length ? h("ol", {}, r.steps.map(s => h("li", {}, s))) : h("p", { class: "empty" }, "Brak."),
+    h("div", { class: "actions" },
+      h("a", { href: `#/edit/${r.name}`, class: "button primary" }, "Edytuj"),
+      h("button", { class: "danger", onclick: async () => {
+        if (!confirm(`Usunąć „${r.title}”? Przepis trafi do kosza na serwerze.`)) return;
+        try { await api("DELETE", `/api/recipes/${r.name}`); await reload(); location.hash = "#/"; }
+        catch (e) { alert(e.message); }
+      } }, "Usuń")));
+}
+
+function formView(r) {
+  const isNew = !r;
+  r = r || { title: "", tags: [], ingredients: [], steps: [] };
+  const selected = new Set(r.tags);
+  const error = h("p", { class: "error", hidden: true });
+  const title = h("input", { value: r.title, required: true, placeholder: "Żurek z białą kiełbasą" });
+  const newTags = h("input", { placeholder: "nowe tagi, oddzielone przecinkami" });
+  const ingredients = h("textarea", { placeholder: "500 ml zakwasu\n300 g białej kiełbasy" }, r.ingredients.join("\n"));
+  const steps = h("textarea", { placeholder: "Podsmaż boczek z cebulą.\nWlej bulion i gotuj 20 minut." }, r.steps.join("\n"));
+  const lines = t => t.value.split("\n").map(s => s.trim()).filter(Boolean);
+
+  const save = async e => {
+    e.preventDefault();
+    const tags = [...selected, ...newTags.value.split(",").map(s => s.trim()).filter(Boolean)];
+    const body = { title: title.value.trim(), tags, ingredients: lines(ingredients), steps: lines(steps) };
+    if (!body.title) { error.textContent = "Podaj tytuł przepisu."; error.hidden = false; title.focus(); return; }
+    try {
+      const saved = isNew ? await api("POST", "/api/recipes", body) : await api("PUT", `/api/recipes/${r.name}`, body);
+      await reload();
+      location.hash = `#/r/${saved.name}`;
+    } catch (err) { error.textContent = err.message; error.hidden = false; }
+  };
+
+  const existing = allTags();
+  show(
+    header(isNew ? "Nowy przepis" : "Edycja", isNew ? "#/" : `#/r/${r.name}`),
+    h("form", { onsubmit: save },
+      h("label", {}, "Tytuł"), title,
+      h("label", {}, "Tagi ", h("span", { class: "hint" }, "kliknij, żeby zaznaczyć")),
+      existing.length ? h("div", { class: "chips" }, existing.map(t => h("button", {
+        type: "button", class: "chip" + (selected.has(t) ? " on" : ""),
+        onclick: e => { selected.has(t) ? selected.delete(t) : selected.add(t); e.target.classList.toggle("on"); },
+      }, t))) : null,
+      newTags,
+      h("label", {}, "Składniki ", h("span", { class: "hint" }, "jeden w linii")), ingredients,
+      h("label", {}, "Przygotowanie ", h("span", { class: "hint" }, "jeden krok w linii")), steps,
+      error,
+      h("div", { class: "actions" },
+        h("button", { type: "submit", class: "primary" }, "Zapisz"),
+        h("a", { href: isNew ? "#/" : `#/r/${r.name}`, class: "button" }, "Anuluj"))));
+  if (isNew) title.focus();
+}
+
+// --- Routing -------------------------------------------------------------------------
+
+async function reload() { recipes = await api("GET", "/api/recipes"); }
+
+async function route() {
+  const [, view, name] = location.hash.split("/");
+  try {
+    if (view === "r") recipeView(await api("GET", `/api/recipes/${name}`));
+    else if (view === "edit") formView(await api("GET", `/api/recipes/${name}`));
+    else if (view === "new") formView(null);
+    else listView();
+  } catch (e) {
+    show(header("eCookBook", "#/"), h("p", { class: "error" }, e.message));
+  }
+}
+
+window.addEventListener("hashchange", route);
+reload().then(route).catch(e => show(header("eCookBook"), h("p", { class: "error" }, `Nie można połączyć się z serwerem: ${e.message}`)));
+</script>
+</body>
+</html>

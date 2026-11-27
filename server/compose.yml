@@ -1,0 +1,19 @@
+# eCookBook - przepisy: aplikacja WWW i synchronizacja czytnika E1001. Dodane 2026-11-27.
+# Kod: github.com/marcinoktawian/eCookBook (server/). Opis wdrożenia: server/README.md.
+# Port tylko na 127.0.0.1: z zewnątrz wchodzi się przez Caddy (http://ecookbook.pi-nas.lan).
+services:
+  ecookbook:
+    container_name: ecookbook
+    image: python:3.13-alpine
+    restart: unless-stopped
+    user: "1000:100"
+    command: ["python", "-u", "/app/serve.py", "--dir", "/recipes", "--port", "8082"]
+    ports:
+      - "127.0.0.1:8082:8082"
+    volumes:
+      - /srv/dev-disk-by-uuid-90cee710-436c-4114-89da-3bba871b1961/appdata/ecookbook/app:/app:ro
+      - /srv/dev-disk-by-uuid-90cee710-436c-4114-89da-3bba871b1961/appdata/ecookbook/recipes:/recipes
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"

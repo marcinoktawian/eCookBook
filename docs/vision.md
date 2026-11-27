@@ -57,18 +57,32 @@ tags: [włoskie, mięso]
 
 Urządzenie obsługuje tylko część Markdowna: nagłówki, listy i zwykłe akapity.
 
-## Synchronizacja
+## Serwer i aplikacja WWW
 
 ```
-serwer domowy (zwykły HTTP, pliki statyczne)      E1001
-  recipes/*.md                                   ──▶  /sd/recipes/*.md
-  index.json  (tytuł, tagi, skrót pliku)         ──▶  /sd/index.json
+             pi-nas: kontener ecookbook (Python, bez zależności)
+             ┌─────────────────────────────────────────────┐
+ telefon ───▶│  aplikacja WWW (jeden plik HTML + JS)       │
+ laptop  ───▶│  /api/recipes   czytaj, dodaj, edytuj, usuń │──▶ folder recipes/*.md
+ E1001  ────▶│  /index.json    synchronizacja urządzenia   │
+             └─────────────────────────────────────────────┘
 ```
 
-- **Serwer:** zwykły serwer plików statycznych (nginx albo `python -m http.server`) plus
-  skrypt, który buduje `index.json`. Nie trzeba pisać własnego backendu.
+- **Jedno źródło prawdy:** pliki `.md` w folderze na NAS-ie. Nie ma bazy danych.
+- **Aplikacja WWW:** `http://ecookbook.pi-nas.lan`, dostępna w sieci domowej i przez
+  Tailscale. Nie jest wystawiona do internetu, więc nie ma osobnego logowania.
+- **Edycja przez formularz:** tytuł, tagi, składniki (jeden w linii) i kroki (jeden w linii).
+  Serwer zamienia to na format `.md` opisany wyżej, żeby nikt nie musiał znać Markdowna.
+- **Bezpieczne zapisy:** plik jest najpierw zapisywany obok, a potem podmieniany, więc
+  urządzenie nie pobierze połowy pliku. Usunięcie przenosi przepis do `recipes/.trash/`.
+- **Lista zakupów** (następny krok): zaznaczasz przepisy, a strona składa listę składników
+  pogrupowaną według przepisów. Na telefonie trafia do systemowego menu „Udostępnij”,
+  na komputerze można ją skopiować albo pobrać jako `.txt`.
+
+## Synchronizacja urządzenia
+
 - **Urządzenie:** pobiera `index.json` i ściąga tylko te pliki, których skrót się zmienił.
-  Synchronizację uruchamia się ręcznie z menu.
+  Przepisy usunięte z serwera znikają z karty. Synchronizację uruchamia się ręcznie.
 - **Praca bez sieci:** urządzenie zawsze czyta przepisy z karty SD.
 
 ## Czego świadomie nie robimy
@@ -76,7 +90,9 @@ serwer domowy (zwykły HTTP, pliki statyczne)      E1001
 - **Wyszukiwania po tekście.** Na 3 przyciskach nie da się wygodnie pisać, więc zamiast tego
   przeglądamy przepisy po tagach.
 - **Zdjęć potraw.** Ekran jest czarno-biały i nie ma odcieni szarości.
-- **Edycji przepisów na urządzeniu.** Przepisy edytuje się na komputerze.
+- **Edycji przepisów na urządzeniu.** Przepisy edytuje się w aplikacji WWW.
+- **Sumowania składników na liście zakupów.** Ilości są pisane ręcznie („2 łyżki”, „szczypta”),
+  więc rozpoznawanie jednostek dawałoby błędy.
 - **Dotyku.** E1001 go nie ma.
 
 ## Etapy
@@ -85,7 +101,8 @@ serwer domowy (zwykły HTTP, pliki statyczne)      E1001
 1. **Przyciski:** krótkie i długie naciśnięcia.
 2. **Jeden przepis z karty SD:** z polskimi znakami (czcionka UTF-8) i podziałem na strony.
 3. **Nawigacja:** tagi, lista przepisów, przepis.
-4. **Synchronizacja z serwerem domowym.**
+4. **Serwer i aplikacja WWW na pi-nas:** przeglądanie, dodawanie, edycja i usuwanie
+   przepisów, a potem lista zakupów i synchronizacja urządzenia z serwerem.
 5. **Usypianie i pomiar baterii.**
 6. **Dopracowanie wyglądu:** wybór lepszej czcionki. Na razie jest New Century Schoolbook
    z U8g2 (`ncen*_te`), która działa, ale warto porównać inne.
