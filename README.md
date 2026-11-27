@@ -5,6 +5,11 @@ przechowywane lokalnie na karcie SD, pobiera się je z serwera domowego, a przeg
 
 Docelowy efekt opisuje [docs/vision.md](docs/vision.md).
 
+## Serwer i aplikacja WWW
+
+Przepisy przeglądasz, dodajesz i edytujesz w przeglądarce pod `http://ecookbook.pi-nas.lan`
+(sieć domowa i Tailscale). Kod, testy i opis wdrożenia na pi-nas są w [server/](server/README.md).
+
 ## Firmware
 
 Wymagany jest [PlatformIO](https://platformio.org/). E1001 podłączasz kablem USB-C z
