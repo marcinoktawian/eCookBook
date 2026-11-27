@@ -23,12 +23,14 @@ Seeed reTerminal E1001:
 |---|---|---|
 | Lewo | poprzednia pozycja lub strona | cofnij |
 | Prawo | następna pozycja lub strona | menu (synchronizacja, informacje) |
-| Wybierz (zielony) | otwórz | uśpienie |
+| Wybierz (zielony) | otwórz; w przepisie: przeskok składniki ⇄ przygotowanie | uśpienie |
 
 - **Tagi:** lista tagów, np. `mięso`, `wegetariańskie`, `włoskie`, `azjatyckie`, z liczbą
   przepisów przy każdym. Jest też pozycja „Wszystkie”.
 - **Lista przepisów:** tytuły przepisów z wybranym tagiem, ułożone alfabetycznie.
-- **Przepis:** tytuł, składniki i kroki, podzielone na strony.
+- **Przepis:** jedna kolumna, podzielona na strony. Otwiera się na składnikach, a po nich
+  idzie przygotowanie. Zielony przycisk przeskakuje na pierwszą stronę drugiej sekcji
+  i z powrotem. W nagłówku jest tytuł, nazwa sekcji i numer strony.
 - **Usypianie:** gdy żaden przycisk nie jest używany przez kilka minut, urządzenie przechodzi
   w głęboki sen. Ekran e-ink dalej pokazuje ostatnią stronę, więc przepis widać podczas
   gotowania. Budzi je dowolny przycisk.
