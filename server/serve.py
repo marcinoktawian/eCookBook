@@ -7,6 +7,7 @@ Standard library only, so it runs on a bare python image.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -163,6 +164,17 @@ class Store:
         text = self._path(name).read_text(encoding="utf-8", errors="replace")
         return {"name": name, **parse(text)}
 
+    def raw(self, name):
+        return self._path(name).read_bytes()
+
+    def index(self):
+        """`sha256sum` format, one line per recipe: what the E1001 compares against its card."""
+        lines = []
+        for path in sorted(self.dir.glob("*.md")):
+            if NAME_RE.match(path.stem):
+                lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+        return "".join(lines)
+
     def _write(self, path, recipe):
         # Write next to the target and rename, so a reader (the E1001 sync) never sees half a file.
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".", suffix=".tmp")
@@ -241,8 +253,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self, method):
         try:
-            if method == "GET" and self.path.split("?")[0] in ("/", "/index.html"):
+            path = self.path.split("?")[0]
+            if method == "GET" and path in ("/", "/index.html"):
                 self._send(HTTPStatus.OK, (WEB_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            # Device sync: the index, then each changed recipe file as-is.
+            if method == "GET" and path == "/index.txt":
+                self._send(HTTPStatus.OK, self.store.index().encode("utf-8"), "text/plain; charset=utf-8")
+                return
+            if method == "GET" and path.startswith("/recipes/") and path.endswith(".md"):
+                name = path[len("/recipes/"):-len(".md")]
+                self._send(HTTPStatus.OK, self.store.raw(name), "text/markdown; charset=utf-8")
                 return
             name = self._route()
             if method == "GET" and name is None:
