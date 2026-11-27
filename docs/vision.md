@@ -85,3 +85,5 @@ serwer domowy (zwykły HTTP, pliki statyczne)      E1001
 3. **Nawigacja:** tagi, lista przepisów, przepis.
 4. **Synchronizacja z serwerem domowym.**
 5. **Usypianie i pomiar baterii.**
+6. **Dopracowanie wyglądu:** wybór lepszej czcionki. Na razie jest New Century Schoolbook
+   z U8g2 (`ncen*_te`), która działa, ale warto porównać inne.
