@@ -29,8 +29,10 @@ Seeed reTerminal E1001:
   przepisów przy każdym. Jest też pozycja „Wszystkie”.
 - **Lista przepisów:** tytuły przepisów z wybranym tagiem, ułożone alfabetycznie.
 - **Przepis:** jedna kolumna, podzielona na strony. Otwiera się na składnikach, a po nich
-  idzie przygotowanie. Zielony przycisk przeskakuje na pierwszą stronę drugiej sekcji
-  i z powrotem. W nagłówku jest tytuł, nazwa sekcji i numer strony.
+  idzie przygotowanie. Zielony przycisk z dowolnej strony przygotowania przeskakuje do
+  składników, a drugie naciśnięcie wraca dokładnie na tę stronę, z której przyszedłeś.
+  Ze składników, gdy nic nie jest zapamiętane, przeskakuje na początek przygotowania.
+  W nagłówku jest tytuł, nazwa sekcji i numer strony.
 - **Usypianie:** gdy żaden przycisk nie jest używany przez kilka minut, urządzenie przechodzi
   w głęboki sen. Ekran e-ink dalej pokazuje ostatnią stronę, więc przepis widać podczas
   gotowania. Budzi je dowolny przycisk.
