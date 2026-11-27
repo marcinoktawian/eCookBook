@@ -75,9 +75,11 @@ Urządzenie obsługuje tylko część Markdowna: nagłówki, listy i zwykłe aka
   Serwer zamienia to na format `.md` opisany wyżej, żeby nikt nie musiał znać Markdowna.
 - **Bezpieczne zapisy:** plik jest najpierw zapisywany obok, a potem podmieniany, więc
   urządzenie nie pobierze połowy pliku. Usunięcie przenosi przepis do `recipes/.trash/`.
-- **Lista zakupów** (następny krok): zaznaczasz przepisy, a strona składa listę składników
-  pogrupowaną według przepisów. Na telefonie trafia do systemowego menu „Udostępnij”,
-  na komputerze można ją skopiować albo pobrać jako `.txt`.
+- **Lista zakupów:** w przepisie wybierasz „Dodaj do listy zakupów”, a lista zbiera składniki
+  pogrupowane według przepisów. Odznaczasz to, co już masz, i kopiujesz albo pobierasz
+  listę jako `.txt`. „Udostępnij” (systemowe menu telefonu) pojawi się dopiero po
+  włączeniu HTTPS, bo przeglądarki udostępniają je tylko na bezpiecznych stronach.
+  Lista jest zapisywana osobno na każdym urządzeniu.
 
 ## Synchronizacja urządzenia
 
