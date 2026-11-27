@@ -45,6 +45,12 @@
   .empty, .error { color: var(--muted); padding: 24px 0; }
   .error { color: var(--danger); }
   ol li, ul li { margin-bottom: 6px; }
+  .check { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; font-weight: 400; margin: 0; }
+  .check input { width: 20px; height: 20px; margin-top: 3px; flex: none; }
+  .check.off span { color: var(--muted); text-decoration: line-through; }
+  .shop-head { display: flex; align-items: center; gap: 8px; }
+  .shop-head h2 { flex: 1; }
+  .notice { color: var(--accent); min-height: 1.5em; }
 </style>
 </head>
 <body>
@@ -57,6 +63,14 @@ let recipes = [];
 let activeTag = "";
 let query = "";
 
+// Shopping list: { recipeName: [indexes of ingredients you already have] }. Kept per device in
+// localStorage; the page still works (for this visit only) when storage is blocked.
+const CART_KEY = "ecookbook.shopping";
+let cart = {};
+try { cart = JSON.parse(localStorage.getItem(CART_KEY)) || {}; } catch { cart = {}; }
+function saveCart() { try { localStorage.setItem(CART_KEY, JSON.stringify(cart)); } catch {} }
+const inCart = name => Object.hasOwn(cart, name);
+
 // Tiny DOM helper: text always goes in as text nodes, never as HTML.
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -68,7 +82,7 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-function show(...nodes) { app.replaceChildren(...nodes); window.scrollTo(0, 0); }
+function show(...nodes) { app.replaceChildren(...nodes.flat().filter(n => n != null)); window.scrollTo(0, 0); }
 
 async function api(method, path, body) {
   const opts = { method, headers: {} };
@@ -85,10 +99,16 @@ const byTitle = (a, b) => collator.compare(a.title, b.title);
 const allTags = () => [...new Set(recipes.flatMap(r => r.tags))].sort(collator.compare);
 const norm = s => s.toLocaleLowerCase("pl").normalize("NFD").replace(/\p{M}/gu, "").replace(/ł/g, "l");
 
-function header(title, back) {
+function header(title, back, extra) {
   return h("header", {},
     back ? h("a", { href: back, class: "button", "aria-label": "Wstecz" }, "←") : null,
-    h("h1", {}, title));
+    h("h1", {}, title),
+    extra);
+}
+
+function cartLink() {
+  const n = Object.keys(cart).length;
+  return h("a", { href: "#/shopping", class: "button" }, n ? `Lista zakupów (${n})` : "Lista zakupów");
 }
 
 // --- Views ---------------------------------------------------------------------------
@@ -113,7 +133,7 @@ function listView() {
 
   render();
   show(
-    header("Przepisy"),
+    header("Przepisy", null, cartLink()),
     h("input", { type: "search", placeholder: "Szukaj w tytułach, tagach i składnikach", value: query,
       oninput: e => { query = e.target.value; render(); } }),
     h("div", { class: "chips" }, chip("", "Wszystkie"), allTags().map(t => chip(t, t))),
@@ -122,6 +142,12 @@ function listView() {
 }
 
 function recipeView(r) {
+  const cartButton = h("button", { onclick: () => {
+    if (inCart(r.name)) delete cart[r.name]; else cart[r.name] = [];
+    saveCart();
+    cartButton.textContent = inCart(r.name) ? "Usuń z listy zakupów" : "Dodaj do listy zakupów";
+  } }, inCart(r.name) ? "Usuń z listy zakupów" : "Dodaj do listy zakupów");
+
   show(
     header(r.title, "#/"),
     r.tags.length ? h("div", { class: "chips" }, r.tags.map(t => h("span", { class: "chip" }, t))) : null,
@@ -130,6 +156,7 @@ function recipeView(r) {
     h("h2", {}, "Przygotowanie"),
     r.steps.length ? h("ol", {}, r.steps.map(s => h("li", {}, s))) : h("p", { class: "empty" }, "Brak."),
     h("div", { class: "actions" },
+      cartButton,
       h("a", { href: `#/edit/${r.name}`, class: "button primary" }, "Edytuj"),
       h("button", { class: "danger", onclick: async () => {
         if (!confirm(`Usunąć „${r.title}”? Przepis trafi do kosza na serwerze.`)) return;
@@ -181,6 +208,91 @@ function formView(r) {
   if (isNew) title.focus();
 }
 
+// Plain text that pastes cleanly into notes, Keep or a message: one block per recipe.
+function shoppingText(items) {
+  const blocks = items
+    .map(({ recipe, have }) => [recipe.title, ...recipe.ingredients.filter((_, i) => !have.includes(i)).map(i => `- ${i}`)])
+    .filter(block => block.length > 1)
+    .map(block => block.join("\n"));
+  return ["Lista zakupów", ...blocks].join("\n\n") + "\n";
+}
+
+// navigator.clipboard needs HTTPS (and may still be refused); otherwise use select-and-copy.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { return await navigator.clipboard.writeText(text); } catch {}
+  }
+  const area = h("textarea", { readonly: true, style: "position:fixed;opacity:0" }, text);
+  document.body.append(area);
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  if (!ok) throw new Error("Przeglądarka nie pozwoliła skopiować.");
+}
+
+function shoppingView() {
+  // Drop recipes deleted since they were added.
+  for (const name of Object.keys(cart)) if (!recipes.some(r => r.name === name)) delete cart[name];
+  saveCart();
+  const items = () => Object.entries(cart).map(([name, have]) => ({ recipe: recipes.find(r => r.name === name), have }));
+
+  if (!items().length) {
+    show(header("Lista zakupów", "#/"),
+      h("p", { class: "empty" }, "Lista jest pusta. Otwórz przepis i wybierz „Dodaj do listy zakupów”."));
+    return;
+  }
+
+  const notice = h("p", { class: "notice", role: "status" });
+  const say = text => { notice.textContent = text; };
+
+  const sections = items().map(({ recipe, have }) => h("section", {},
+    h("div", { class: "shop-head" },
+      h("h2", {}, h("a", { href: `#/r/${recipe.name}` }, recipe.title)),
+      h("button", { onclick: () => { delete cart[recipe.name]; saveCart(); shoppingView(); } }, "Usuń")),
+    recipe.ingredients.map((ing, i) => {
+      const box = h("input", { type: "checkbox", checked: !have.includes(i) });
+      const row = h("label", { class: "check" + (have.includes(i) ? " off" : "") }, box, h("span", {}, ing));
+      box.addEventListener("change", () => {
+        const list = cart[recipe.name];
+        if (box.checked) list.splice(list.indexOf(i), 1); else list.push(i);
+        row.classList.toggle("off", !box.checked);
+        saveCart();
+      });
+      return row;
+    })));
+
+  const share = async () => {
+    try { await navigator.share({ title: "Lista zakupów", text: shoppingText(items()) }); }
+    catch (e) { if (e.name !== "AbortError") say(e.message); }
+  };
+  const copy = async () => {
+    try { await copyText(shoppingText(items())); say("Skopiowano. Wklej listę w notatkach albo w wiadomości."); }
+    catch (e) { say(e.message); }
+  };
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([shoppingText(items())], { type: "text/plain;charset=utf-8" }));
+    const a = h("a", { href: url, download: `lista-zakupow-${new Date().toISOString().slice(0, 10)}.txt` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  show(
+    header("Lista zakupów", "#/"),
+    h("p", { class: "hint" }, "Odznacz to, co już masz w domu."),
+    sections,
+    h("div", { class: "actions" },
+      navigator.share ? h("button", { class: "primary", onclick: share }, "Udostępnij") : null,
+      h("button", { class: navigator.share ? "" : "primary", onclick: copy }, "Kopiuj"),
+      h("button", { onclick: download }, "Pobierz .txt"),
+      h("button", { class: "danger", onclick: () => {
+        if (!confirm("Wyczyścić listę zakupów?")) return;
+        cart = {}; saveCart(); shoppingView();
+      } }, "Wyczyść")),
+    notice);
+}
+
 // --- Routing -------------------------------------------------------------------------
 
 async function reload() { recipes = await api("GET", "/api/recipes"); }
@@ -191,6 +303,7 @@ async function route() {
     if (view === "r") recipeView(await api("GET", `/api/recipes/${name}`));
     else if (view === "edit") formView(await api("GET", `/api/recipes/${name}`));
     else if (view === "new") formView(null);
+    else if (view === "shopping") shoppingView();
     else listView();
   } catch (e) {
     show(header("eCookBook", "#/"), h("p", { class: "error" }, e.message));
