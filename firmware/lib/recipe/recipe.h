@@ -14,6 +14,7 @@ struct Block {
 
 struct Recipe {
   std::string title;
+  std::vector<std::string> tags;  // from `tags: [a, b]` (inline list only)
   std::vector<Block> blocks;
 };
 

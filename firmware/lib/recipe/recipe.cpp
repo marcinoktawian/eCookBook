@@ -20,6 +20,21 @@ std::string unquote(const std::string &s) {
   return s;
 }
 
+std::vector<std::string> parseInlineList(std::string value) {
+  value = trim(value);
+  if (!value.empty() && value.front() == '[') value.erase(0, 1);
+  if (!value.empty() && value.back() == ']') value.pop_back();
+
+  std::vector<std::string> items;
+  std::istringstream in(value);
+  std::string item;
+  while (std::getline(in, item, ',')) {
+    item = unquote(trim(item));
+    if (!item.empty()) items.push_back(item);
+  }
+  return items;
+}
+
 }  // namespace
 
 Recipe parseRecipe(const std::string &markdown) {
@@ -43,6 +58,8 @@ Recipe parseRecipe(const std::string &markdown) {
         inFrontMatter = false;
       } else if (startsWith(line, "title:")) {
         recipe.title = unquote(trim(line.substr(6)));
+      } else if (startsWith(line, "tags:")) {
+        recipe.tags = parseInlineList(line.substr(5));
       }
       continue;
     }
