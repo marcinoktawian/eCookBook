@@ -97,6 +97,9 @@ async function api(method, path, body) {
 const collator = new Intl.Collator("pl", { sensitivity: "base" });
 const byTitle = (a, b) => collator.compare(a.title, b.title);
 const allTags = () => [...new Set(recipes.flatMap(r => r.tags))].sort(collator.compare);
+// Tags are shown in Polish alphabetical order whatever order the file lists them in.
+const withSortedTags = r => ({ ...r, tags: [...r.tags].sort(collator.compare) });
+const getRecipe = async name => withSortedTags(await api("GET", `/api/recipes/${name}`));
 const norm = s => s.toLocaleLowerCase("pl").normalize("NFD").replace(/\p{M}/gu, "").replace(/ł/g, "l");
 
 function header(title, back, extra) {
@@ -295,13 +298,13 @@ function shoppingView() {
 
 // --- Routing -------------------------------------------------------------------------
 
-async function reload() { recipes = await api("GET", "/api/recipes"); }
+async function reload() { recipes = (await api("GET", "/api/recipes")).map(withSortedTags); }
 
 async function route() {
   const [, view, name] = location.hash.split("/");
   try {
-    if (view === "r") recipeView(await api("GET", `/api/recipes/${name}`));
-    else if (view === "edit") formView(await api("GET", `/api/recipes/${name}`));
+    if (view === "r") recipeView(await getRecipe(name));
+    else if (view === "edit") formView(await getRecipe(name));
     else if (view === "new") formView(null);
     else if (view === "shopping") shoppingView();
     else listView();
