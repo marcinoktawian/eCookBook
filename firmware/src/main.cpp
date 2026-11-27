@@ -1,12 +1,16 @@
 #include <Arduino.h>
 #include <GxEPD2_BW.h>
+#include <HTTPClient.h>
 #include <SD.h>
 #include <SPI.h>
 #include <U8g2_for_Adafruit_GFX.h>
+#include <WiFi.h>
+#include <mbedtls/sha256.h>
 
 #include "button.h"
 #include "catalog.h"
 #include "recipe.h"
+#include "sync.h"
 
 // reTerminal E1001 wiring. The panel and the microSD card share SCK/MOSI on one SPI bus.
 constexpr int SPI_SCK = 7;
@@ -29,6 +33,12 @@ constexpr size_t KEY_COUNT = sizeof(KEY_PINS) / sizeof(KEY_PINS[0]);
 constexpr const char *RECIPES_DIR = "/recipes";
 constexpr size_t MAX_RECIPE_BYTES = 32 * 1024;
 constexpr const char *ALL_RECIPES = "Wszystkie";
+
+constexpr const char *CONFIG_PATH = "/config.txt";
+constexpr const char *DOWNLOAD_TMP = "/recipes/.download.tmp";  // hidden: never in the catalog
+constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
+constexpr uint16_t HTTP_TIMEOUT_MS = 10000;
+constexpr int MAX_INDEX_BYTES = 64 * 1024;
 
 // Screen layout (800x480, landscape).
 constexpr int MARGIN = 24;
@@ -211,12 +221,19 @@ bool readFile(const char *path, std::string &out) {
   return true;
 }
 
+bool sdReady = false;
+constexpr const char *NO_RECIPES = "Brak przepisów. Przytrzymaj prawy, żeby pobrać.";
+
 // Reads the header of every .md file in RECIPES_DIR. Returns an error for the screen, or nullptr.
 const char *loadCatalog() {
-  if (!SD.begin(SD_CS, spiBus, 10000000)) return "Brak karty SD";
+  catalog.clear();
+  tags.clear();
+  listed.clear();
+  tagSel = recipeSel = 0;
+  if (!sdReady) return "Brak karty SD";
 
   File dir = SD.open(RECIPES_DIR);
-  if (!dir || !dir.isDirectory()) return "Brak folderu /recipes";
+  if (!dir || !dir.isDirectory()) return NO_RECIPES;
 
   for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
     const String name = f.name();
@@ -232,7 +249,7 @@ const char *loadCatalog() {
     const Recipe r = parseRecipe(text);
     catalog.push_back({r.title.empty() ? std::string(name.c_str()) : r.title, r.tags, path.c_str()});
   }
-  if (catalog.empty()) return "Brak przepisu w /recipes";
+  if (catalog.empty()) return NO_RECIPES;
 
   tags = collectTags(catalog);
   tags.insert(tags.begin(), {ALL_RECIPES, catalog.size()});
@@ -251,6 +268,181 @@ bool openRecipe(const RecipeInfo &info) {
   currentPage = 0;
   returnPage = -1;
   return true;
+}
+
+// --- Sync with the home server ---------------------------------------------------------
+
+std::string sha256File(const char *path) {
+  File f = SD.open(path);
+  if (!f) return "";
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
+  uint8_t buf[512];
+  size_t n;
+  while ((n = f.read(buf, sizeof(buf))) > 0) mbedtls_sha256_update_ret(&ctx, buf, n);
+  uint8_t digest[32];
+  mbedtls_sha256_finish_ret(&ctx, digest);
+  mbedtls_sha256_free(&ctx);
+
+  char hex[65];
+  for (int i = 0; i < 32; ++i) snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+  return hex;
+}
+
+// Hashes of the recipe files on the card that sync manages. Files with other names (copied
+// by hand) are left alone: they are neither compared nor removed.
+std::map<std::string, std::string> localRecipes() {
+  std::map<std::string, std::string> local;
+  File dir = SD.open(RECIPES_DIR);
+  if (!dir || !dir.isDirectory()) return local;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    const std::string name = f.name();
+    const String path = f.path();
+    const bool managed = !f.isDirectory() && isSafeRecipeFile(name);
+    f.close();
+    if (managed) local[name] = sha256File(path.c_str());
+  }
+  return local;
+}
+
+bool fetchIndex(const std::string &server, std::string &out) {
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin((server + "/index.txt").c_str())) return false;
+  const int code = http.GET();
+  const int size = http.getSize();
+  const bool ok = code == HTTP_CODE_OK && size >= 0 && size <= MAX_INDEX_BYTES;
+  if (ok) {
+    const String body = http.getString();
+    out.assign(body.c_str(), body.length());
+  }
+  http.end();
+  return ok;
+}
+
+// Downloads to a temp file, checks size and hash, and only then replaces the recipe, so a
+// failed or tampered download never leaves a broken recipe on the card.
+bool downloadRecipe(const std::string &server, const RemoteFile &file) {
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin((server + "/recipes/" + file.name).c_str())) return false;
+  const int code = http.GET();
+  const int size = http.getSize();
+  bool ok = code == HTTP_CODE_OK && size >= 0 && size_t(size) <= MAX_RECIPE_BYTES;
+  if (ok) {
+    File tmp = SD.open(DOWNLOAD_TMP, FILE_WRITE);
+    ok = tmp && http.writeToStream(&tmp) == size;
+    tmp.close();
+  }
+  http.end();
+
+  const std::string target = std::string(RECIPES_DIR) + "/" + file.name;
+  ok = ok && sha256File(DOWNLOAD_TMP) == file.sha256;
+  if (ok) {
+    if (SD.exists(target.c_str())) SD.remove(target.c_str());  // FAT cannot rename over a file
+    ok = SD.rename(DOWNLOAD_TMP, target.c_str());
+  }
+  if (SD.exists(DOWNLOAD_TMP)) SD.remove(DOWNLOAD_TMP);
+  return ok;
+}
+
+// Prints a config value so stray quotes, spaces or invisible characters are obvious.
+void logQuoted(const char *label, const std::string &value) {
+  Serial.printf("%s: \"%s\" (%u bytes)", label, value.c_str(), unsigned(value.size()));
+  for (unsigned char c : value) {
+    if (c < 0x20 || c == 0x7F) Serial.printf(" [control 0x%02X]", c);
+  }
+  Serial.println();
+}
+
+volatile int wifiDisconnectReason = 0;
+
+// Connects to Wi-Fi. Returns "" on success, or the reason in words for the screen.
+std::string connectWifi(const Config &config) {
+  logQuoted("Wi-Fi SSID", config.ssid);
+  Serial.printf("Wi-Fi password: %u characters\n", unsigned(config.password.size()));
+
+  wifiDisconnectReason = 0;
+  const wifi_event_id_t handler = WiFi.onEvent(
+      [](WiFiEvent_t, WiFiEventInfo_t info) {
+        wifiDisconnectReason = info.wifi_sta_disconnected.reason;
+        Serial.printf("Wi-Fi disconnected, reason %d\n", wifiDisconnectReason);
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(config.ssid.c_str(), config.password.c_str());
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) delay(200);
+  WiFi.removeEvent(handler);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Wi-Fi connected: IP %s, RSSI %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    return "";
+  }
+  const int reason = wifiDisconnectReason;
+  Serial.printf("Wi-Fi failed: status %d, last reason %d\n", int(WiFi.status()), reason);
+
+  switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND: {
+      // Show what the radio can see, to spot a typo or a 5 GHz-only network. The pending
+      // connection attempt must stop first, or the scan fails with WIFI_SCAN_FAILED (-2).
+      WiFi.disconnect();
+      const int count = WiFi.scanNetworks();
+      Serial.printf("Visible networks (%d):\n", count);
+      for (int i = 0; i < count && i < 15; ++i) {
+        Serial.printf("  \"%s\" ch %d, %d dBm\n", WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
+      }
+      return "Nie widzę sieci \"" + config.ssid + "\"";
+    }
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_EXPIRE:
+      return "Złe hasło do Wi-Fi";
+    case 0:
+      return "Wi-Fi: brak odpowiedzi";
+    default:
+      return "Wi-Fi: błąd " + std::to_string(reason);
+  }
+}
+
+// The part of a sync that needs a connection. Returns the line to show on screen.
+std::string syncOverWifi(const std::string &server) {
+  std::string indexText;
+  std::vector<RemoteFile> remote;
+  if (!fetchIndex(server, indexText)) return "Serwer nie odpowiada";
+  if (!parseIndex(indexText, remote)) return "Serwer zwrócił błędną listę";
+
+  const SyncPlan plan = planSync(remote, localRecipes());
+  int downloaded = 0, failed = 0;
+  for (const RemoteFile &file : plan.download) downloadRecipe(server, file) ? ++downloaded : ++failed;
+  for (const std::string &name : plan.remove) SD.remove((std::string(RECIPES_DIR) + "/" + name).c_str());
+
+  if (!downloaded && !failed && plan.remove.empty()) return "Przepisy są aktualne";
+  std::string result = "Pobrano " + std::to_string(downloaded) + ", usunięto " + std::to_string(plan.remove.size());
+  if (failed) result += ", błędy: " + std::to_string(failed);
+  return result;
+}
+
+// Runs one sync and returns the line to show on screen.
+std::string syncRecipes() {
+  std::string text;
+  if (!sdReady) return "Brak karty SD";
+  if (!readFile(CONFIG_PATH, text)) return "Brak pliku /config.txt na karcie";
+  const Config config = parseConfig(text);
+  if (config.ssid.empty() || config.server.empty()) return "Uzupełnij wifi_ssid i server w /config.txt";
+
+  showMessage("Synchronizacja…");
+  SD.mkdir(RECIPES_DIR);
+  std::string result = connectWifi(config);
+  if (result.empty()) result = syncOverWifi(config.server);
+
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);  // the radio is the biggest battery drain
+  Serial.printf("Sync: %s\n", result.c_str());
+  return result;
 }
 
 // --- Navigation ------------------------------------------------------------------------
@@ -310,6 +502,17 @@ bool handle(const KeyEvent &e) {
 
 // --- Main ------------------------------------------------------------------------------
 
+// (Re)reads the card and shows the tag list, or the reason there is nothing to show.
+void showCatalog() {
+  screen = Screen::Tags;
+  if (const char *error = loadCatalog()) {
+    Serial.println(error);
+    showMessage(error);
+  } else {
+    draw(true);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   for (int pin : KEY_PINS) pinMode(pin, INPUT_PULLUP);
@@ -325,12 +528,8 @@ void setup() {
   u8g2.setForegroundColor(GxEPD_BLACK);
   u8g2.setBackgroundColor(GxEPD_WHITE);
 
-  if (const char *error = loadCatalog()) {
-    Serial.println(error);
-    showMessage(error);
-  } else {
-    draw(true);
-  }
+  sdReady = SD.begin(SD_CS, spiBus, 10000000);
+  showCatalog();
 
   keyEvents = xQueueCreate(16, sizeof(KeyEvent));
   xTaskCreate(keyTask, "keys", 2048, nullptr, 2, nullptr);
@@ -339,16 +538,30 @@ void setup() {
 void loop() {
   KeyEvent e;
   xQueueReceive(keyEvents, &e, portMAX_DELAY);
-  if (catalog.empty()) return;
 
   // Apply every queued press, then draw once: fast presses skip intermediate refreshes.
   // Changing screens uses a full refresh to clear e-ink ghosting; moving within one is partial.
+  // A long right press syncs from any screen, including "no recipes yet".
   const Screen beforeScreen = screen;
   const size_t before[] = {tagSel, recipeSel, currentPage};
   bool screenChanged = false;
+  bool sync = false;
   do {
-    screenChanged |= handle(e);
+    if (e.press == Press::Long && e.pin == KEY_RIGHT) {
+      sync = true;
+    } else if (!catalog.empty()) {
+      screenChanged |= handle(e);
+    }
   } while (xQueueReceive(keyEvents, &e, 0) == pdTRUE);
+
+  if (sync) {
+    showMessage(syncRecipes().c_str());
+    delay(2000);  // leave the result readable before the tag list replaces it
+    showCatalog();
+    xQueueReset(keyEvents);  // presses made during the sync were aimed at nothing
+    return;
+  }
+  if (catalog.empty()) return;
 
   const bool moved = before[0] != tagSel || before[1] != recipeSel || before[2] != currentPage;
   if (screenChanged || screen != beforeScreen) {

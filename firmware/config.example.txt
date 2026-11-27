@@ -1,0 +1,6 @@
+# eCookBook: ustawienia czytnika. Skopiuj na kartę SD jako /config.txt i uzupełnij.
+# Wartość to wszystko po "=", BEZ cudzysłowów. Znaki specjalne w haśle (", =, #) wpisz zwyczajnie.
+# Czytnik łączy się tylko z Wi-Fi 2,4 GHz.
+wifi_ssid=Nazwa Twojej Sieci
+wifi_password=
+server=http://ecookbook.pi-nas.lan

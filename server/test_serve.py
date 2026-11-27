@@ -1,5 +1,6 @@
 """Tests for serve.py:  python -m unittest discover server"""
 
+import hashlib
 import http.client
 import json
 import tempfile
@@ -96,6 +97,24 @@ class ApiTest(unittest.TestCase):
         status, body = self.request("POST", "/api/recipes", SAMPLE, content_type="text/plain")
         self.assertEqual(status, 400)
         self.assertIn("Content-Type", body["error"])
+
+    def test_device_sync_index_and_raw_files(self):
+        _, created = self.request("POST", "/api/recipes", SAMPLE)
+        status, index = self.request("GET", "/index.txt")
+        self.assertEqual(status, 200)
+        digest, name = index.decode().split()
+        self.assertEqual(name, "placki-ziemniaczane.md")
+
+        status, raw = self.request("GET", "/recipes/placki-ziemniaczane.md")
+        self.assertEqual(status, 200)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)  # the device verifies this
+        self.assertEqual(self.request("GET", "/recipes/..%2Fserve.md")[0], 404)
+
+    def test_index_skips_trash_and_temp_files(self):
+        self.request("POST", "/api/recipes", SAMPLE)
+        self.request("DELETE", "/api/recipes/placki-ziemniaczane")
+        (Path(self.tmp.name) / ".x.tmp").write_text("half")
+        self.assertEqual(self.request("GET", "/index.txt")[1], b"")
 
     def test_serves_the_web_app(self):
         status, body = self.request("GET", "/")
